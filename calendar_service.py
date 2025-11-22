@@ -1,65 +1,85 @@
 import datetime
-import os.path
+import os, os.path
+import json # <-- Added this for JSON parsing of the environment variable
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 # If modifying these scopes, delete the file token.json
 SCOPES = ['https://www.googleapis.com/auth/calendar']
-CREDENTIALS_FILE = 'credentials.json'
-TOKEN_FILE = 'token.json'
+CREDENTIALS_FILE = "credentials.json"
+TOKEN_FILE = "token.json"
 
 def get_calendar_service():
     """Handles Google login/authorization and returns the calendar API service object."""
-    creds = None
     
+    # 1. CHECK FOR DEPLOYED TOKEN (FOR RENDER DEPLOYMENT)
+    if 'GOOGLE_CALENDAR_TOKEN' in os.environ:
+        try:
+            # Load credentials directly from the environment variable (JSON string)
+            token_data = json.loads(os.environ['GOOGLE_CALENDAR_TOKEN'])
+            creds = Credentials.from_authorized_user_info(token_data, SCOPES)
+            service = build('calendar', 'v3', credentials=creds)
+            
+            # CRITICAL FIX: RETURN IMMEDIATELY, STOPPING THE FUNCTION HERE
+            return service 
+        except Exception as e:
+            # If loading fails (e.g., bad format), log the error and continue to local check
+            print(f"Error loading GOOGLE_CALENDAR_TOKEN from environment: {e}")
+
+    # 2. LOCAL LOGIC (The original flow for your development machine)
+    creds = None
     if os.path.exists(TOKEN_FILE):
         creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
     
+    # Check if credentials are valid
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
+            # If expired but has a refresh token, renew it
             creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                CREDENTIALS_FILE, SCOPES)
+            # If no token, or invalid, run the local server flow (triggers browser sign-in)
+            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
             creds = flow.run_local_server(port=0)
-        
+
+        # Save the new credentials for the next local run
         with open(TOKEN_FILE, 'w') as token:
             token.write(creds.to_json())
-    
+
+    # 3. BUILD AND RETURN THE SERVICE (For local runs that reach this point)
     service = build('calendar', 'v3', credentials=creds)
     return service
 
 def find_open_slots(service, calendar_id='primary'):
     """Queries the calendar API for busy slots in the next 48 hours."""
-    
-    now = datetime.datetime.utcnow().isoformat() + 'Z' 
-    
-    tomorrow = datetime.datetime.utcnow().date() + datetime.timedelta(days=2)
-    time_max = datetime.datetime.combine(tomorrow, datetime.time(23, 59, 59)).isoformat() + 'Z'
-    
-    body = {
-        "timeMin": now,
-        "timeMax": time_max,
-        "items": [{"id": calendar_id}]
-    }
+    now = datetime.datetime.utcnow().isoformat() + 'Z' # 'Z' indicates UTC time
+    end_time = (datetime.datetime.utcnow() + datetime.timedelta(hours=48)).isoformat() + 'Z'
 
     try:
-        events_result = service.freebusy().query(body=body).execute()
-        busy_slots = events_result['calendars'][calendar_id]['busy']
+        events_result = service.events().list(
+            calendarId=calendar_id,
+            timeMin=now,
+            timeMax=end_time,
+            singleEvents=True,
+            orderBy='startTime'
+        ).execute()
         
-        if busy_slots:
-            formatted_slots = []
-            for slot in busy_slots[:3]: 
-                # Convert UTC time to a more readable format
-                start_time = datetime.datetime.fromisoformat(slot['start'].replace('Z', '+00:00')).strftime('%A, %I:%M %p')
-                end_time = datetime.datetime.fromisoformat(slot['end'].replace('Z', '+00:00')).strftime('%I:%M %p')
-                formatted_slots.append(f"OCCUPIED: {start_time} - {end_time} UTC")
+        # This function is usually meant to return the events, but for simplicity,
+        # we'll return a placeholder string based on results.
+        events = events_result.get('items', [])
 
-            return formatted_slots
+        if not events:
+            return "No upcoming events found. The next 48 hours are likely open."
         else:
-            return ["Calendar is completely open for the next 48 hours!"]
+            busy_slots = []
+            for event in events:
+                start = event['start'].get('dateTime', event['start'].get('date'))
+                end = event['end'].get('dateTime', event['end'].get('date'))
+                busy_slots.append(f"Busy from {start} to {end} with event: {event.get('summary', 'No Title')}")
             
-    except Exception as e:
-        return [f"Error checking calendar: {e}"]
+            return "\n".join(busy_slots)
+
+    except HttpError as error:
+        return f'An error occurred: {error}'
