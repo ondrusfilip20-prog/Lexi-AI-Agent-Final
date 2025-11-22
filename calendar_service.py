@@ -1,6 +1,6 @@
 import datetime
 import os, os.path
-import json # <-- Added this for JSON parsing of the environment variable
+import json # Essential for reading the token from the environment variable
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -9,13 +9,15 @@ from googleapiclient.errors import HttpError
 
 # If modifying these scopes, delete the file token.json
 SCOPES = ['https://www.googleapis.com/auth/calendar']
-CREDENTIALS_FILE = "credentials.json"
-TOKEN_FILE = "token.json"
 
 def get_calendar_service():
-    """Handles Google login/authorization and returns the calendar API service object."""
+    """
+    Handles Google authorization. 
+    This version is designed specifically for Render and relies ONLY on 
+    the GOOGLE_CALENDAR_TOKEN environment variable.
+    """
     
-    # 1. CHECK FOR DEPLOYED TOKEN (FOR RENDER DEPLOYMENT)
+    # Check for the deployed token
     if 'GOOGLE_CALENDAR_TOKEN' in os.environ:
         try:
             # Load credentials directly from the environment variable (JSON string)
@@ -23,38 +25,21 @@ def get_calendar_service():
             creds = Credentials.from_authorized_user_info(token_data, SCOPES)
             service = build('calendar', 'v3', credentials=creds)
             
-            # CRITICAL FIX: RETURN IMMEDIATELY, STOPPING THE FUNCTION HERE
+            # CRITICAL: Returns immediately for the successful deployment
             return service 
         except Exception as e:
-            # If loading fails (e.g., bad format), log the error and continue to local check
-            print(f"Error loading GOOGLE_CALENDAR_TOKEN from environment: {e}")
+            # If loading fails, something is wrong with the JSON string itself
+            print(f"FATAL ERROR: GOOGLE_CALENDAR_TOKEN environment variable is invalid: {e}")
+            raise e 
 
-    # 2. LOCAL LOGIC (The original flow for your development machine)
-    creds = None
-    if os.path.exists(TOKEN_FILE):
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-    
-    # Check if credentials are valid
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            # If expired but has a refresh token, renew it
-            creds.refresh(Request())
-        else:
-            # If no token, or invalid, run the local server flow (triggers browser sign-in)
-            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
-            creds = flow.run_local_server(port=0)
-
-        # Save the new credentials for the next local run
-        with open(TOKEN_FILE, 'w') as token:
-            token.write(creds.to_json())
-
-    # 3. BUILD AND RETURN THE SERVICE (For local runs that reach this point)
-    service = build('calendar', 'v3', credentials=creds)
-    return service
+    # If the environment variable is not set (should not happen on Render)
+    print("FATAL ERROR: GOOGLE_CALENDAR_TOKEN environment variable not found. Calendar tool is disabled.")
+    raise EnvironmentError("Calendar token not found. Cannot initialize Google Calendar.")
 
 def find_open_slots(service, calendar_id='primary'):
     """Queries the calendar API for busy slots in the next 48 hours."""
-    now = datetime.datetime.utcnow().isoformat() + 'Z' # 'Z' indicates UTC time
+    # Ensure local machine runs in UTC for compatibility with the API
+    now = datetime.datetime.utcnow().isoformat() + 'Z' 
     end_time = (datetime.datetime.utcnow() + datetime.timedelta(hours=48)).isoformat() + 'Z'
 
     try:
@@ -66,8 +51,6 @@ def find_open_slots(service, calendar_id='primary'):
             orderBy='startTime'
         ).execute()
         
-        # This function is usually meant to return the events, but for simplicity,
-        # we'll return a placeholder string based on results.
         events = events_result.get('items', [])
 
         if not events:
@@ -77,9 +60,9 @@ def find_open_slots(service, calendar_id='primary'):
             for event in events:
                 start = event['start'].get('dateTime', event['start'].get('date'))
                 end = event['end'].get('dateTime', event['end'].get('date'))
-                busy_slots.append(f"Busy from {start} to {end} with event: {event.get('summary', 'No Title')}")
+                busy_slots.append(f"Busy from {event.get('summary', 'No Title')}: {start} to {end}")
             
             return "\n".join(busy_slots)
 
     except HttpError as error:
-        return f'An error occurred: {error}'
+        return f'An error occurred while fetching calendar data: {error}'
